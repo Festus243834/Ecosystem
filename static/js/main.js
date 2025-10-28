@@ -237,4 +237,3 @@ style.textContent = `
 document.head.appendChild(style);
 
 console.log('Ecocycle initialized successfully! 🌱');
-

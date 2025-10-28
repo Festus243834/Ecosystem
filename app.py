@@ -1,5 +1,3 @@
-
-
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_file
 from werkzeug.utils import secure_filename
 from functools import wraps
@@ -19,19 +17,29 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico', 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
 # Database initialization
 def init_db():
     """Initialize the SQLite database with all required tables"""
     conn = sqlite3.connect('ecocycle.db')
     c = conn.cursor()
     
-    # Students table
+    # Students table (now users table with authentication)
     c.execute('''CREATE TABLE IF NOT EXISTS students
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL,
+                  username TEXT UNIQUE,
+                  password_hash TEXT,
                   department TEXT NOT NULL,
                   residence TEXT NOT NULL,
                   points INTEGER DEFAULT 0,
+                  phone TEXT NOT NULL,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
     # Waste logs table with approval and scanning support
@@ -127,23 +135,96 @@ def admin_required(f):
 
 @app.route('/')
 def index():
-    """Student registration landing page"""
+    """User registration landing page"""
     return render_template('index.html')
+
+@app.route('/user/login', methods=['GET', 'POST'])
+def user_login():
+    """User login page and authentication"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not all([username, password]):
+            return jsonify({'success': False, 'message': 'Username and password required'}), 400
+        
+        conn = get_db()
+        user = conn.execute('SELECT * FROM students WHERE username = ?', (username,)).fetchone()
+        conn.close()
+        
+        if not user or not user['password_hash'] or not check_password_hash(user['password_hash'], password):
+            return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
+        
+        session['student_id'] = user['id']
+        session['student_name'] = user['name']
+        return jsonify({'success': True, 'redirect': url_for('user_dashboard')})
+    
+    return render_template('user_login.html')
+
+@app.route('/user/dashboard')
+def user_dashboard():
+    """User dashboard with stats and quick actions"""
+    if 'student_id' not in session:
+        return redirect(url_for('user_login'))
+    
+    conn = get_db()
+    student_id = session['student_id']
+    
+    # Get user details
+    user = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
+    
+    # Get total waste logs count
+    total_waste_logs = conn.execute('SELECT COUNT(*) as count FROM waste_logs WHERE student_id = ?', 
+                                     (student_id,)).fetchone()['count']
+    
+    # Get redeemed rewards
+    redeemed = conn.execute('''SELECT r.name, r.points_required, rr.redeemed_at
+                              FROM redeemed_rewards rr
+                              JOIN rewards r ON rr.reward_id = r.id
+                              WHERE rr.student_id = ?
+                              ORDER BY rr.redeemed_at DESC LIMIT 5''', (student_id,)).fetchall()
+    
+    # Get recent waste logs
+    recent_logs = conn.execute('''SELECT * FROM waste_logs 
+                                 WHERE student_id = ? 
+                                 ORDER BY logged_at DESC LIMIT 5''', (student_id,)).fetchall()
+    
+    conn.close()
+    
+    return render_template('user_dashboard.html', 
+                         user=user, 
+                         total_waste_logs=total_waste_logs,
+                         redeemed_rewards=redeemed,
+                         recent_logs=recent_logs)
 
 @app.route('/register', methods=['POST'])
 def register_student():
-    """Register a new student"""
+    """Register a new user"""
     name = request.form.get('name')
     department = request.form.get('department')
     residence = request.form.get('residence')
+    username = request.form.get('username')
+    password = request.form.get('password')
+    phone = request.form.get('phone')
     
-    if not all([name, department, residence]):
+    if not all([name, department, residence, username, password]):
         return jsonify({'success': False, 'message': 'All fields are required'}), 400
     
     conn = get_db()
+    
+    # Check if username already exists
+    existing = conn.execute('SELECT id FROM students WHERE username = ?', (username,)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Username already exists'}), 400
+    
+    # Hash the password
+    password_hash = hash_password(password)
+    
+    # Insert new user
     c = conn.cursor()
-    c.execute('INSERT INTO students (name, department, residence) VALUES (?, ?, ?)',
-              (name, department, residence))
+    c.execute('INSERT INTO students (name, department, residence, username, phone, password_hash) VALUES (?, ?, ?, ?, ?, ?)',
+              (name, department, residence, username, phone, password_hash))
     student_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -152,7 +233,7 @@ def register_student():
     session['student_id'] = student_id
     session['student_name'] = name
     
-    return jsonify({'success': True, 'redirect': url_for('waste_logs')})
+    return jsonify({'success': True, 'redirect': url_for('user_dashboard')})
 
 @app.route('/about')
 def about():
@@ -466,6 +547,40 @@ def delete_developer(dev_id):
     
     return jsonify({'success': True, 'message': 'Developer profile deleted successfully'})
 
+@app.route('/admin/delete-user/<int:user_id>', methods=['POST'])
+@admin_required
+def delete_user(user_id):
+    """Delete a user/student"""
+    conn = get_db()
+    
+    # Delete related records first
+    conn.execute('DELETE FROM waste_logs WHERE student_id = ?', (user_id,))
+    conn.execute('DELETE FROM redeemed_rewards WHERE student_id = ?', (user_id,))
+    
+    # Delete the user
+    conn.execute('DELETE FROM students WHERE id = ?', (user_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'message': 'User deleted successfully'})
+
+@app.route('/admin/edit-user-points/<int:user_id>', methods=['POST'])
+@admin_required
+def edit_user_points(user_id):
+    """Edit a user's points"""
+    new_points = request.form.get('points', type=int)
+    
+    if new_points is None or new_points < 0:
+        return jsonify({'success': False, 'message': 'Invalid points value'}), 400
+    
+    conn = get_db()
+    conn.execute('UPDATE students SET points = ? WHERE id = ?', (new_points, user_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'message': 'Points updated successfully'})
+
 @app.route('/admin/students')
 @admin_required
 def admin_students():
@@ -485,46 +600,49 @@ def admin_dashboard():
     """Comprehensive admin dashboard with analytics"""
     conn = get_db()
     
-    # Get statistics
     total_students = conn.execute('SELECT COUNT(*) as count FROM students').fetchone()['count']
     total_waste_logs = conn.execute('SELECT COUNT(*) as count FROM waste_logs').fetchone()['count']
     pending_approvals = conn.execute('SELECT COUNT(*) as count FROM waste_logs WHERE approval_status = "pending"').fetchone()['count']
     total_rewards = conn.execute('SELECT COUNT(*) as count FROM rewards').fetchone()['count']
     total_points_distributed = conn.execute('SELECT SUM(points) as total FROM students').fetchone()['total'] or 0
     
-    # Get recent students
-    recent_students = conn.execute('''SELECT * FROM students 
-                                      ORDER BY created_at DESC LIMIT 10''').fetchall()
+    # Convert query results to dicts
+    def rows_to_dicts(rows):
+        return [dict(r) for r in rows]
+
+    recent_students = rows_to_dicts(conn.execute(
+        'SELECT * FROM students ORDER BY created_at DESC LIMIT 10').fetchall())
     
-    # Get pending waste logs for approval
-    pending_logs = conn.execute('''SELECT wl.*, s.name as student_name, s.department 
-                                  FROM waste_logs wl
-                                  JOIN students s ON wl.student_id = s.id
-                                  WHERE wl.approval_status = "pending"
-                                  ORDER BY wl.logged_at DESC''').fetchall()
+    pending_logs = rows_to_dicts(conn.execute('''
+        SELECT wl.*, s.name as student_name, s.department 
+        FROM waste_logs wl
+        JOIN students s ON wl.student_id = s.id
+        WHERE wl.approval_status = "pending"
+        ORDER BY wl.logged_at DESC
+    ''').fetchall())
     
-    # Get top students
-    top_students = conn.execute('''SELECT * FROM students 
-                                  ORDER BY points DESC LIMIT 5''').fetchall()
+    top_students = rows_to_dicts(conn.execute(
+        'SELECT * FROM students ORDER BY points DESC LIMIT 5').fetchall())
     
-    # Get waste statistics by type
-    waste_stats = conn.execute('''SELECT waste_type, COUNT(*) as count, SUM(quantity) as total_quantity
-                                 FROM waste_logs
-                                 WHERE approval_status = "approved"
-                                 GROUP BY waste_type''').fetchall()
+    waste_stats = rows_to_dicts(conn.execute('''
+        SELECT waste_type, COUNT(*) as count, SUM(quantity) as total_quantity
+        FROM waste_logs
+        WHERE approval_status = "approved"
+        GROUP BY waste_type
+    ''').fetchall())
     
     conn.close()
     
     return render_template('admin_dashboard.html',
-                         total_students=total_students,
-                         total_waste_logs=total_waste_logs,
-                         pending_approvals=pending_approvals,
-                         total_rewards=total_rewards,
-                         total_points_distributed=total_points_distributed,
-                         recent_students=recent_students,
-                         pending_logs=pending_logs,
-                         top_students=top_students,
-                         waste_stats=waste_stats)
+                           total_students=total_students,
+                           total_waste_logs=total_waste_logs,
+                           pending_approvals=pending_approvals,
+                           total_rewards=total_rewards,
+                           total_points_distributed=total_points_distributed,
+                           recent_students=recent_students,
+                           pending_logs=pending_logs,
+                           top_students=top_students,
+                           waste_stats=waste_stats)
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():

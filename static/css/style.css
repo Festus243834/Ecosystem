@@ -54,25 +54,7 @@ body {
     align-items: center;
 }
 
-.logo {
-    display: flex;
-    align-items: center;
-}
-
-.logo-placeholder {
-    background: var(--white);
-    padding: 10px 20px;
-    border-radius: 10px;
-    box-shadow: 0 2px 5px var(--shadow);
-}
-
-.logo-text {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--primary-green);
-    letter-spacing: 1px;
-}
-
+    
 .nav-links {
     display: flex;
     gap: 1.5rem;
@@ -1048,6 +1030,33 @@ body {
 }
 
 /* Responsive Design */
+@media (max-width: 968px) {
+    .container {
+        padding: 0 15px;
+    }
+
+    .logs-table-container,
+    .leaderboard-table {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .logs-table,
+    .leaderboard-table table {
+        min-width: 600px;
+    }
+
+    .admin-nav-links {
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .admin-nav-link {
+        font-size: 0.9rem;
+        padding: 6px 12px;
+    }
+}
+
 @media (max-width: 768px) {
     .nav-links {
         position: fixed;
@@ -1060,6 +1069,7 @@ body {
         transition: 0.3s;
         box-shadow: 0 10px 27px rgba(0, 0, 0, 0.05);
         padding: 20px 0;
+        z-index: 999;
     }
 
     .nav-links.active {
@@ -1068,6 +1078,10 @@ body {
 
     .menu-toggle {
         display: flex;
+    }
+
+    .hero-section {
+        padding: 60px 0;
     }
 
     .hero-title {
@@ -1101,6 +1115,46 @@ body {
         margin: 20% 20px;
         padding: 30px 20px;
     }
+
+    .registration-section,
+    .dashboard-section,
+    .waste-logs-section,
+    .rewards-section,
+    .about-section {
+        padding: 40px 0;
+    }
+
+    .stats-card,
+    .redeemed-section,
+    .leaderboard-section {
+        padding: 30px 20px;
+    }
+
+    .action-btn {
+        font-size: 0.75rem;
+        padding: 4px 8px;
+        display: block;
+        width: 100%;
+        margin: 4px 0;
+    }
+
+    .logs-table th,
+    .logs-table td,
+    .leaderboard-table th,
+    .leaderboard-table td {
+        padding: 10px 8px;
+        font-size: 0.9rem;
+    }
+
+    .reward-footer {
+        flex-direction: column;
+        gap: 10px;
+        align-items: flex-start;
+    }
+
+    .reward-footer .btn {
+        width: 100%;
+    }
 }
 
 @media (max-width: 480px) {
@@ -1111,9 +1165,22 @@ body {
     .registration-card,
     .admin-card {
         padding: 30px 20px;
+        margin: 0 10px;
+    }
+
+    .hero-section {
+        padding: 40px 0;
     }
 
     .hero-title {
+        font-size: 1.5rem;
+    }
+
+    .hero-subtitle {
+        font-size: 0.9rem;
+    }
+
+    .page-title {
         font-size: 1.5rem;
     }
 
@@ -1121,5 +1188,99 @@ body {
         padding: 10px 20px;
         font-size: 0.9rem;
     }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+        font-size: 0.95rem;
+    }
+
+    .stat-icon {
+        font-size: 2rem;
+    }
+
+    .stat-content h3 {
+        font-size: 1.5rem;
+    }
+
+    .redeemed-item {
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 15px;
+    }
+
+    .modal-content {
+        margin: 10% 10px;
+        padding: 20px 15px;
+    }
+
+    .modal-actions {
+        flex-direction: column;
+    }
+
+    .search-input {
+        padding: 10px 15px;
+        font-size: 0.9rem;
+    }
+
+    .admin-nav-links {
+        gap: 8px;
+    }
+
+    .admin-nav-link {
+        font-size: 0.8rem;
+        padding: 6px 10px;
+    }
 }
 
+
+
+
+
+/* ===== TEXT LOGO ===== */
+.logo {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin-bottom: 1rem;
+}
+
+.logo-text {
+  font-family: 'Poppins', sans-serif;
+  font-weight: 800;
+  font-size: 2rem;
+  color: #ffffff; 
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: transform 0.2s ease, color 0.3s ease;
+}
+
+.logo-text:hover {
+  transform: scale(1.05);
+  color: yellow;
+}
+
+.logo-icon {
+  font-size: 1.8rem;
+}
+
+/* RESPONSIVENESS */
+@media (max-width: 768px) {
+  .logo-text {
+    font-size: 1.6rem;
+  }
+  .logo-icon {
+    font-size: 1.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .logo-text {
+    font-size: 1.4rem;
+  }
+  .logo-icon {
+    font-size: 1.3rem;
+  }
+}

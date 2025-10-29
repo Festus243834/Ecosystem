@@ -39,10 +39,29 @@ def init_db():
                   department TEXT NOT NULL,
                   residence TEXT NOT NULL,
                   points INTEGER DEFAULT 0,
+                  total_points_earned INTEGER DEFAULT 0,
                   phone TEXT NOT NULL,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Waste logs table with approval and scanning support
+    # Add total_points_earned column if it doesn't exist (for existing databases)
+    try:
+        c.execute('ALTER TABLE students ADD COLUMN total_points_earned INTEGER DEFAULT 0')
+        # Backfill total_points_earned from existing points column for migration
+        c.execute('UPDATE students SET total_points_earned = points WHERE total_points_earned = 0')
+        conn.commit()
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
+    
+    # Ensure existing records have total_points_earned backfilled (idempotent migration)
+    # This handles cases where total_points_earned was added but not backfilled
+    try:
+        c.execute('UPDATE students SET total_points_earned = points WHERE total_points_earned = 0 AND points > 0')
+        conn.commit()
+    except:
+        pass
+    
+    # Waste logs table with approval and photo upload support
     c.execute('''CREATE TABLE IF NOT EXISTS waste_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   student_id INTEGER,
@@ -50,11 +69,18 @@ def init_db():
                   quantity INTEGER DEFAULT 1,
                   points_earned INTEGER DEFAULT 10,
                   scanned_code TEXT,
+                  image_path TEXT,
                   approval_status TEXT DEFAULT 'pending',
                   approved_by INTEGER,
                   logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (student_id) REFERENCES students (id),
                   FOREIGN KEY (approved_by) REFERENCES admins (id))''')
+    
+    # Add image_path column if it doesn't exist (for existing databases)
+    try:
+        c.execute('ALTER TABLE waste_logs ADD COLUMN image_path TEXT')
+    except sqlite3.OperationalError:
+        pass
     
     # Admins table
     c.execute('''CREATE TABLE IF NOT EXISTS admins
@@ -91,6 +117,26 @@ def init_db():
                   role TEXT NOT NULL,
                   image_path TEXT,
                   bio TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Sponsors/Collaborators table
+    c.execute('''CREATE TABLE IF NOT EXISTS sponsors
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  logo_path TEXT,
+                  website TEXT,
+                  description TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Waste collection booths table
+    c.execute('''CREATE TABLE IF NOT EXISTS booths
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  location_name TEXT NOT NULL,
+                  latitude REAL NOT NULL,
+                  longitude REAL NOT NULL,
+                  opening_hours TEXT,
+                  contact TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
     conn.commit()
@@ -134,8 +180,13 @@ def admin_required(f):
 # Routes
 
 @app.route('/')
+def landing():
+    """New landing page with stats and information"""
+    return render_template('landing.html')
+
+@app.route('/register')
 def index():
-    """User registration landing page"""
+    """User registration page"""
     return render_template('index.html')
 
 @app.route('/user/login', methods=['GET', 'POST'])
@@ -267,37 +318,51 @@ def waste_logs():
 
 @app.route('/add-waste', methods=['POST'])
 def add_waste():
-    """Add a new waste log entry with scanning requirement"""
+    """Add a new waste log entry with photo upload or QR/barcode scanning"""
     if 'student_id' not in session:
         return jsonify({'success': False, 'message': 'Not logged in'}), 401
     
     waste_type = request.form.get('waste_type')
     quantity = int(request.form.get('quantity', 1))
-    scanned_code = request.form.get('scanned_code')
+    scanned_code = request.form.get('scanned_code', '')
     
     if not waste_type:
         return jsonify({'success': False, 'message': 'Waste type is required'}), 400
     
-    if not scanned_code:
-        return jsonify({'success': False, 'message': 'Barcode/QR code scan is required'}), 400
+    # Handle photo upload
+    image_path = None
+    if 'waste_image' in request.files:
+        file = request.files['waste_image']
+        if file and file.filename and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{timestamp}_{filename}"
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'waste', filename)
+            file.save(filepath)
+            image_path = f'uploads/waste/{filename}'
     
-    # Points per waste item (will be awarded after admin approval)
-    points_per_item = 10
-    points_earned = quantity * points_per_item
+    # Require either scanned code or photo (1kg = 10 points)
+    if not scanned_code and not image_path:
+        return jsonify({'success': False, 'message': 'Please provide either a barcode/QR code scan or upload a photo of the waste'}), 400
+    
+    # Points calculation: 1kg of waste = 10 points
+    points_per_kg = 10
+    points_earned = quantity * points_per_kg
     
     conn = get_db()
     student_id = session['student_id']
     
     # Add waste log with pending approval status
-    conn.execute('''INSERT INTO waste_logs (student_id, waste_type, quantity, points_earned, scanned_code, approval_status) 
-                   VALUES (?, ?, ?, ?, ?, 'pending')''', (student_id, waste_type, quantity, points_earned, scanned_code))
+    conn.execute('''INSERT INTO waste_logs (student_id, waste_type, quantity, points_earned, scanned_code, image_path, approval_status) 
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending')''', 
+                   (student_id, waste_type, quantity, points_earned, scanned_code, image_path))
     
     # Don't update student points yet - points awarded only after admin approval
     
     conn.commit()
     conn.close()
     
-    return jsonify({'success': True, 'message': 'Waste log submitted for approval', 'points_earned': points_earned})
+    return jsonify({'success': True, 'message': 'Waste log submitted for approval (1kg = 10 points)', 'points_earned': points_earned})
 
 @app.route('/available-rewards')
 def available_rewards():
@@ -376,10 +441,10 @@ def rewards_dashboard():
                               WHERE rr.student_id = ?
                               ORDER BY rr.redeemed_at DESC''', (student_id,)).fetchall()
     
-    # Get leaderboard (top 10 students)
-    leaderboard = conn.execute('''SELECT name, department, points 
+    # Get leaderboard (top 10 students by total points earned)
+    leaderboard = conn.execute('''SELECT name, department, residence, total_points_earned 
                                  FROM students 
-                                 ORDER BY points DESC 
+                                 ORDER BY total_points_earned DESC 
                                  LIMIT 10''').fetchall()
     
     conn.close()
@@ -501,9 +566,12 @@ def approve_waste_log(log_id):
                    SET approval_status = "approved", approved_by = ?
                    WHERE id = ?''', (session['admin_id'], log_id))
     
-    # Award points to student
-    conn.execute('UPDATE students SET points = points + ? WHERE id = ?',
-                (log['points_earned'], log['student_id']))
+    # Award points to student (both current points and total points earned)
+    conn.execute('''UPDATE students 
+                   SET points = points + ?, 
+                       total_points_earned = total_points_earned + ? 
+                   WHERE id = ?''',
+                (log['points_earned'], log['points_earned'], log['student_id']))
     
     conn.commit()
     conn.close()
@@ -680,7 +748,131 @@ def admin_logout():
 def logout():
     """Log out current student"""
     session.clear()
-    return redirect(url_for('index'))
+    return redirect(url_for('landing'))
+
+# API endpoints for landing page
+@app.route('/api/stats')
+def get_stats():
+    """Get overall statistics for landing page"""
+    conn = get_db()
+    
+    total_users = conn.execute('SELECT COUNT(*) as count FROM students').fetchone()['count']
+    total_points = conn.execute('SELECT SUM(total_points_earned) as total FROM students').fetchone()['total'] or 0
+    total_rewards = conn.execute('SELECT COUNT(*) as count FROM redeemed_rewards').fetchone()['count']
+    total_waste_logs = conn.execute('SELECT COUNT(*) as count FROM waste_logs WHERE approval_status = "approved"').fetchone()['count']
+    
+    conn.close()
+    
+    return jsonify({
+        'total_users': total_users,
+        'total_points_generated': total_points,
+        'total_rewards_given': total_rewards,
+        'total_waste_logs': total_waste_logs
+    })
+
+@app.route('/api/booths')
+def get_booths():
+    """Get all waste collection booth locations"""
+    conn = get_db()
+    booths = conn.execute('SELECT * FROM booths').fetchall()
+    conn.close()
+    
+    booths_list = [dict(booth) for booth in booths]
+    return jsonify({'booths': booths_list})
+
+@app.route('/api/leaderboard/departments')
+def get_department_leaderboard():
+    """Get department leaderboard"""
+    conn = get_db()
+    departments = conn.execute('''
+        SELECT department, SUM(total_points_earned) as total_points, COUNT(*) as student_count
+        FROM students
+        GROUP BY department
+        ORDER BY total_points DESC
+        LIMIT 10
+    ''').fetchall()
+    conn.close()
+    
+    dept_list = [dict(dept) for dept in departments]
+    return jsonify({'departments': dept_list})
+
+@app.route('/api/leaderboard/halls')
+def get_hall_leaderboard():
+    """Get hall/residence leaderboard"""
+    conn = get_db()
+    halls = conn.execute('''
+        SELECT residence as hall, SUM(total_points_earned) as total_points, COUNT(*) as student_count
+        FROM students
+        GROUP BY residence
+        ORDER BY total_points DESC
+        LIMIT 10
+    ''').fetchall()
+    conn.close()
+    
+    hall_list = [dict(hall) for hall in halls]
+    return jsonify({'halls': hall_list})
+
+@app.route('/api/sponsors')
+def get_sponsors():
+    """Get all sponsors/collaborators"""
+    conn = get_db()
+    sponsors = conn.execute('SELECT * FROM sponsors ORDER BY id').fetchall()
+    conn.close()
+    
+    sponsor_list = [dict(sponsor) for sponsor in sponsors]
+    return jsonify({'sponsors': sponsor_list})
+
+@app.route('/admin/add-sponsor', methods=['GET', 'POST'])
+@admin_required
+def add_sponsor():
+    """Admin page to add sponsors/collaborators"""
+    if request.method == 'POST':
+        name = request.form.get('name')
+        website = request.form.get('website', '')
+        description = request.form.get('description', '')
+        
+        # Handle file upload with validation
+        logo_path = None
+        if 'logo' in request.files:
+            file = request.files['logo']
+            if file and file.filename and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'sponsors', filename)
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                file.save(filepath)
+                logo_path = f'uploads/sponsors/{filename}'
+        
+        conn = get_db()
+        conn.execute('''INSERT INTO sponsors (name, logo_path, website, description)
+                       VALUES (?, ?, ?, ?)''', (name, logo_path, website, description))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': 'Sponsor added successfully'})
+    
+    return render_template('add_sponsor.html')
+
+@app.route('/admin/add-booth', methods=['GET', 'POST'])
+@admin_required
+def add_booth():
+    """Admin page to add waste collection booths"""
+    if request.method == 'POST':
+        name = request.form.get('name')
+        location_name = request.form.get('location_name')
+        latitude = float(request.form.get('latitude'))
+        longitude = float(request.form.get('longitude'))
+        opening_hours = request.form.get('opening_hours', '')
+        contact = request.form.get('contact', '')
+        
+        conn = get_db()
+        conn.execute('''INSERT INTO booths (name, location_name, latitude, longitude, opening_hours, contact)
+                       VALUES (?, ?, ?, ?, ?, ?)''', (name, location_name, latitude, longitude, opening_hours, contact))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': 'Booth added successfully'})
+    
+    return render_template('add_booth.html')
 
 # Initialize database on startup
 if __name__ == '__main__':
